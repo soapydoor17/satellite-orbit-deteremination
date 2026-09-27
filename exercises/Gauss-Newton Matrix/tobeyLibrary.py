@@ -72,7 +72,7 @@ def nuCalc(E, e):
     #   e - Eccentricity
     # Outputs:
     #   nu - True Anomaly (radians)
-    nu = 2 * np.arctan2(np.sqrt(1+e) * np.sin(E/2), np.sqrt(1-e) * np.cos(E/2))
+    nu = np.arctan2(np.sin(E) * np.sqrt(1-e**2), np.cos(E) - e)
     return nu
 
 
