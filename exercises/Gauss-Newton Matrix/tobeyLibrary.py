@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from scipy.spatial.transform import Rotation as R
 
 from astropy.time import Time
@@ -10,7 +11,7 @@ SPEED_OF_LIGHT = 299792458
 
 #---------------------------------------------------
 # Anomaly Propagation:
-#   M0 -> M -> E -> nu
+#   M0 -> M(t) -> E -> nu
 #---------------------------------------------------
 
 # Calculate mean motion (n)
@@ -18,57 +19,51 @@ def nCalc(a, mu=MU_EARTH):
     # Returns the mean motion in rads/s
     return np.sqrt(mu / a**3)
 
-# Newton Raphson to get eccentric anomaly (E) from mean anomaly (M)
-def NewtRaph(M, e, tolerance=10**-8):
+# Solve Kepler's equation M = E - e*sin(E) for E, via Newton-Raphson
+def ECalc(M_deg, e, tolerance=1e-8):
     # Inputs:
-    #   M - Mean anomaly (degrees)
+    #   M - Mean anomaly (degrees), scalar or array-like
     #   e - Eccentricity
-    #   tolerance - default to 10^8
+    #   tolerance - default to 1e-8
     # Outputs:
     #   E - Eccentric anomaly
     
-    M_rad = np.deg2rad(M)
+    M_deg_arr = np.atleast_1d(np.asarray(M_deg, dtype=float))
+    M_rad = np.deg2rad(M_deg_arr)
 
-    if (M_rad>-np.pi and M_rad<0) or (M_rad>np.pi):
-        E = M_rad-e
-    else:
-        E = M_rad+e
+    # Initial guess
+    E = np.where(((M_rad > -np.pi) & (M_rad < 0)) | (M_rad > np.pi),
+                 M_rad - e, M_rad + e)
 
-    while True:
-        sin_E = np.sin(E)
-        cos_E = np.cos(E)
-        nextE = E + (M_rad-E+e*sin_E)/(1-e*cos_E)
+    for i in range(len(E)):
+        E_i = E[i]
+        while True:
+            sin_E = np.sin(E_i)
+            cos_E = np.cos(E_i)
+            next_E = E_i + (M_rad[i] - E_i + e * sin_E) / (1 - e * cos_E)
+            abs_diff = abs(next_E - E_i)
+            E_i = next_E
+            if abs_diff < tolerance:
+                break
+        E[i] = E_i
 
-        abs_diff = abs(nextE-E)
-        E = nextE
+    return E[0] if E.size == 1 else E
 
-        if abs_diff < tolerance:
-            break
-
-    return E
-
-# Calculate eccentric anomaly (E) across several timestamps
-def MultiNewtRaph(t, M_0, n, e, tolerance=10**-8):
+# Propagate mean anomaly from a reference epoch to one or more observation
+#   times (given as ISO 8601 strings), then solve for eccentric anomaly
+def propagateM02E(elapsed_sec, M0_deg, n, e, tolerance=1e-8):
     # Inputs:
-    #   t - array of time entries (s)
-    #   M_0 - initial mean anomaly (deg)
+    #   elapsed_sec - Elapsed time since reference epoch t0 (s), i.e. (t - t0).sec
+    #   M0_deg - initial mean anomaly (deg)
     #   n - mean motion (rads/s) 
     #   e - eccentricity
     # Outputs:
-    #   nu_t - true anomaly (in radians) at each point in time
+    #   E - eccentric anomaly (rad)
 
-    t_0 = t[0]
+    n_deg_s = np.rad2deg(n)
+    M_deg = M0_deg + n_deg_s * elapsed_sec
 
-    # Mean anomalies
-    M_t = np.zeros_like(t)
-    M_t = M_0 + n*(t-t_0)
-
-    # Newton-Raphson to find eccentric anomaly (E)
-    E_t = np.zeros_like(M_t)
-    for i in range(len(M_t)):
-        E_t[i] = NewtRaph(M[i], e, tolerance=tolerance)
-
-    return E_t
+    return ECalc(M_deg, e, tolerance=tolerance)
 
 # Calculate true anomaly (nu)
 def nuCalc(E, e):
@@ -77,9 +72,7 @@ def nuCalc(E, e):
     #   e - Eccentricity
     # Outputs:
     #   nu - True Anomaly (radians)
-     
-    cosE = np.cos(E)
-    nu = np.arccos( (cosE - e)/(1 - e*cosE) ) # in radians
+    nu = 2 * np.arctan2(np.sqrt(1+e) * np.sin(E/2), np.sqrt(1-e) * np.cos(E/2))
     return nu
 
 
@@ -134,33 +127,10 @@ def COE2RV(coe, mu=MU_EARTH):
 
     return r_IJK, v_IJK, R_total
 
-
 #---------------------------------------------------
-# Groundstation Vectors:
-#   Geodetic coords -> ECI
+# Time conversion
 #---------------------------------------------------
-def groundstationECI(lat_deg, lon_deg, alt_m, time, t_scale='utc'):
-    # Inputs:
-    #   lat_deg - latitude of groundstation in degrees
-    #   lon_deg - longitude of groundstation in degrees
-    #   alt_m   - altitude of groundstation in meteers
-    #   time    - ISO 8601 datetime string
-    #   t_scale - Assumed timezone is UTC
-    # Outputs:
-    #   r_gs - cartesian position vector of groundstation
-    #   v_gs - cartesian velocity vector of groundstation 
-    station = EarthLocation(lat=lat_deg*u.deg, lon=lon_deg*u.deg, height=alt_m*u.m)
-    t = Time(time, scale=t_scale)
-    
-    pos, vel = station.get_gcrs_posvel(obstime=t)
-	
-    r_gs = pos.xyz.to(u.m).value 
-    v_gs = vel.xyz.to(u.m/u.s).value
-	
-    return r_gs, v_gs
-
-# Convert separate Y/M/D/H/M/S values into an ISO 8601 datetime string
-def row_to_iso_string(year, month, day, hour, minute, second):
+def ISOString(year, month, day, hour, minute, second):
     # Inputs:
     #   year, month, day, hour, minute - integer
     #   second - float
@@ -172,16 +142,41 @@ def row_to_iso_string(year, month, day, hour, minute, second):
     )
     return dt_str
 
-# Get ISO 8601 datetime string of a specific row from a DataFrame
-# Apply to whole dataframe: 
-#       df["ISO Time"] = df.apply(convert_row, axis=1)
-def convert_row(row):
+# Get astropy.time.Time object of a specific row from a DataFrame
+# Apply to whole dataframe:
+#       df["Time"] = df.apply(getTime, axis=1)
+def getTime(row, t_scale='utc'):
     # Input:  row of DataFrame that has the columns: "Year", "Month", "Day", "Hour", "Minute", "Second"
-    # Output: ISO 8601 datetime string of the inputted row
-    return row_to_iso_string(
+    #         t_scale - time scale, default 'utc'
+    # Output: astropy.time.Time object for the inputted row
+    iso_str = ISOString(
         row["Year"], row["Month"], row["Day"],
         row["Hour"], row["Minute"], row["Second"]
     )
+    return Time(iso_str, scale=t_scale)
+
+
+#---------------------------------------------------
+# Groundstation Vectors:
+#   Geodetic coords -> ECI
+#---------------------------------------------------
+def groundstationECI(lat_deg, lon_deg, alt_m, t):
+    # Inputs:
+    #   lat_deg - latitude of groundstation in degrees
+    #   lon_deg - longitude of groundstation in degrees
+    #   alt_m   - altitude of groundstation in metres
+    #   t       - astropy.time.Time object (single time, or array of times)
+    # Outputs:
+    #   r_gs - cartesian position vector(s) of groundstation (m)
+    #   v_gs - cartesian velocity vector(s) of groundstation (m/s)
+    station = EarthLocation(lat=lat_deg*u.deg, lon=lon_deg*u.deg, height=alt_m*u.m)
+    
+    pos, vel = station.get_gcrs_posvel(obstime=t)
+
+    r_gs = pos.xyz.to(u.m).value
+    v_gs = vel.xyz.to(u.m/u.s).value
+    return r_gs, v_gs
+
 
 #---------------------------------------------------
 # Doppler Shift Calculations from r and v
@@ -202,11 +197,14 @@ def v_relCalc(v, v_gs):
 def kCalc(f_c, c=SPEED_OF_LIGHT):
     return f_c/c
 
+
 # Doppler shift calculation
+# NOTE: NOT USED?
 def fDCalc(k, rho_hat, v_rel):
     return k * rho_hat * (-v_rel)
 
 # Residual Calculation
+# NOTE: NOT USED?
 def residual(y_pred, y_true):
     return y_pred-y_true
 
@@ -232,31 +230,31 @@ def dX_dtCalc(v, r, mu=MU_EARTH):
     return np.concatenate([v, dv_dt])
 
 # Initial Mean Anomaly Gradient
-def dfD_dM_0Calc(dfD_dX, dX_dt, n):
+def dfD_dM0Calc(dfD_dX, dX_dt, n):
     # Inputs:
     #   dfD_dX  - Change in Doppler measurement w.r.t. satellite's cartesian state (1x6 array)
     #   dX_dt   - Change in satellite's cartesian state w.r.t. time (6x1 array)
     #   n      - Mean motion (rad/s)
     # Outputs:
-    #   dfD_dM_0 - Change in Doppler shift w.r.t. Initial Mean Anomaly (Hz/deg)
+    #   dfD_dM0 - Change in Doppler shift w.r.t. Initial Mean Anomaly (Hz/deg)
 
     dM_dt_reciprocal = 1 / np.rad2deg(n)
 
     return dfD_dX @ dX_dt * dM_dt_reciprocal
 
 # Semi-Major Axis Gradient
-def dfD_daCalc(dfD_dX, dX_dt, t, rot_mat, n, a, e, E, nu, mu=MU_EARTH):
+def dfD_daCalc(dfD_dX, dX_dt, elapsed_sec, rot_mat, n, a, e, E, nu, mu=MU_EARTH):
     # Inputs:
-    #   dfD_dX  - Change in Doppler measurement w.r.t. satellite's cartesian state (1x6 array)
-    #   dX_dt   - Change in satellite's cartesian state w.r.t. time (6x1 array)
-    #   t       - Time of observation (s)
-    #   rot_mat - Perifocal-to-ECI rotation matrix (from COE2RV)
-    #   n       - Mean motion (rad/s)
-    #   a       - Semi-major axis (m)
-    #   e       - Eccentricity
-    #   E       - Eccentric anomaly (rad)
-    #   nu      - True anomaly (rad)
-    #   mu      - Gravitational parameter (m^3/s^2) (Defaults to Earth's mu value)
+    #   dfD_dX      - Change in Doppler measurement w.r.t. satellite's cartesian state (1x6 array)
+    #   dX_dt       - Change in satellite's cartesian state w.r.t. time (6x1 array)
+    #   elapsed_sec - Elapsed time since reference epoch t0 (s), i.e. (t - t0).sec
+    #   rot_mat     - Perifocal-to-ECI rotation matrix (from COE2RV)
+    #   n           - Mean motion (rad/s)
+    #   a           - Semi-major axis (m)
+    #   e           - Eccentricity
+    #   E           - Eccentric anomaly (rad)
+    #   nu          - True anomaly (rad)
+    #   mu          - Gravitational parameter (m^3/s^2) (Defaults to Earth's mu value)
     # Outputs:
     #   dfD_da  - Change in Doppler shift w.r.t semi-major axis
     # NOTE: For calculations in this function, M is in radians
@@ -269,7 +267,7 @@ def dfD_daCalc(dfD_dX, dX_dt, t, rot_mat, n, a, e, E, nu, mu=MU_EARTH):
 
     dX_da_M = np.concatenate([dr_da_M, dv_da_M])
     dX_dM = dX_dt / n
-    dM_da = -3/2 * np.sqrt(mu / (a**5)) * t
+    dM_da = -3/2 * np.sqrt(mu / (a**5)) * elapsed_sec
 
     dX_da = dX_da_M + dX_dM * dM_da
 
@@ -278,24 +276,24 @@ def dfD_daCalc(dfD_dX, dX_dt, t, rot_mat, n, a, e, E, nu, mu=MU_EARTH):
 #---------------------------------------------------
 # Jacobian Calculations
 #---------------------------------------------------
-def Jacobian(dfD_dM_0, dfD_da):
+def Jacobian(dfD_dM0, dfD_da):
     # Create Jacobian Matrix
     # Inputs:
-    #   dfD_dM_0 - Initial mean anomaly gradient (scalar or Nx1 array)
+    #   dfD_dM0 - Initial mean anomaly gradient (scalar or Nx1 array)
     #   dfD_da   - Semi-major axis gradient (scalar or Nx1 array)
     # Outputs:
     #   J - Outputs Nx2 array, where N is the number of observations 
 
     # Convert scalar values to 1D arrays
-    dfD_dM_0 = np.atleast_1d(dfD_dM_0)
+    dfD_dM0 = np.atleast_1d(dfD_dM0)
     dfD_da = np.atleast_1d(dfD_da)
 
-    N = len(dfD_dM_0)       # Number of entries
+    N = len(dfD_dM0)       # Number of entries
 
     # Create matrix
     J = np.zeros((N, 2))
     for i in range(N):
-        J[i] = np.array([dfD_dM_0[i], dfD_da[i]])
+        J[i] = np.array([dfD_dM0[i], dfD_da[i]])
 
     return J
 
