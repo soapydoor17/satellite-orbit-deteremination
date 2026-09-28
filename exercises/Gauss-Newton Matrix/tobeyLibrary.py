@@ -84,12 +84,12 @@ def nuCalc(E, e):
 def COE2RV(coe, mu=MU_EARTH):
     # INPUT: 
     #   coe is an array of the Keplerian Orbital Elements
-    #       a - semi-major axis
+    #       a - semi-major axis (m)
     #       e - eccentricity
-    #       i - inclination
-    #       node - right ascension of the ascending node
-    #       arg - argument of perigee
-    #       nu - true anomaly
+    #       i - inclination (deg)
+    #       node - right ascension of the ascending node (deg)
+    #       arg - argument of perigee (deg)
+    #       nu - true anomaly (radian)
     #   mu - gravitational parameters (=GM). Default set to the value for Earth
 
     # OUTPUT:
@@ -99,8 +99,8 @@ def COE2RV(coe, mu=MU_EARTH):
 
     a, e, i, node, arg, nu = coe
 
-    sin_nu = np.sin(np.deg2rad(nu))
-    cos_nu = np.cos(np.deg2rad(nu))
+    sin_nu = np.sin(nu)
+    cos_nu = np.cos(nu)
 
     # Calculate semiparameter (p)
     p = a * (1-e**2)
