@@ -309,3 +309,17 @@ def GaussNewton(J):
      
     N = J.shape[0]
     return 1/N * J.T @ J
+
+def standardisedGaussNewton_M0_a(J):
+    # Create Standardised Gauss-Newton Matrix 
+    # Inputs:
+    #   J - Nx2 Jacobian Matrix, where N is the number of observations
+    # Outputs:
+    #   G_tilde - 2x2 Gauss-Newton Matrix
+
+    G = GaussNewton(J)
+    sigma_M0 = 1 / np.sqrt(G[0, 0])
+    sigma_a = 1 / np.sqrt(G[1, 1])
+    D = np.array([[sigma_M0, 0],[0, sigma_a]])
+
+    return D.T @ G @ D
