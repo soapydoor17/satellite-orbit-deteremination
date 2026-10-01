@@ -11,6 +11,7 @@ HERE = Path(__file__).resolve().parent
 
 norad_id = "62391"
 start_time = "2026-09-29T03:20:00Z"
+end_time = "2026-09-30T04:42:00Z"
 
 print("Retrieving ")
 
